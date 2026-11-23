@@ -35,10 +35,80 @@ helper.Objectsize = function(obj) {
     return size;
 };
 
+var FILE_LIST_SEPARATOR = '------------------------------------';
+
+helper.createOutputState = function(){
+  return { buffer: '', fileListOpen: false };
+};
+
+helper.outputState = helper.createOutputState();
+
+function isFileListHeader(line){
+  return /^(Transfer starting:|sending incremental file list|receiving incremental file list)/.test(line);
+}
+
+function isStatsStart(line){
+  return line.indexOf('Number of files:') === 0;
+}
+
+// Split an rsync output chunk into print events. The file list sits between
+// the transfer header and the stats block; mark that span with separators.
+helper.renderRsyncChunk = function(chunk, state){
+  var events = [];
+
+  state.buffer += chunk;
+  var lines = state.buffer.split('\n');
+  state.buffer = lines.pop();
+
+  lines.forEach(function(line){
+    line = line.replace(/\r/g, '');
+
+    if( isFileListHeader(line) ){
+      state.fileListOpen = true;
+      events.push({ type: 'info', text: line });
+      events.push({ type: 'raw', text: FILE_LIST_SEPARATOR });
+      return;
+    }
+
+    if( state.fileListOpen && isStatsStart(line) ){
+      state.fileListOpen = false;
+      events.push({ type: 'raw', text: FILE_LIST_SEPARATOR });
+    }
+
+    events.push({ type: 'raw', text: line });
+  });
+
+  return events;
+};
+
+helper.writeRsyncEvents = function(events){
+  events.forEach(function(event){
+    if( event.type === 'info' ){
+      cli.info(event.text);
+      return;
+    }
+    console.error(event.text);
+  });
+};
+
+helper.resetRsyncOutput = function(){
+  helper.outputState = helper.createOutputState();
+};
+
+helper.flushRsyncOutput = function(){
+  if( !helper.outputState.buffer ){
+    return;
+  }
+  var rest = helper.outputState.buffer;
+  helper.outputState.buffer = '';
+  helper.writeRsyncEvents(helper.renderRsyncChunk(rest + '\n', helper.outputState));
+};
+
 //Output info messages as rsync runs
 helper.stdoutFunc = function(data){
-  cli.info(data);
-}
+  var text = data && data.toString ? data.toString() : String(data);
+  helper.writeRsyncEvents(helper.renderRsyncChunk(text, helper.outputState));
+};
 
 //Output error messages as rsync runs
 helper.stderrFunc = function(data){
@@ -51,26 +121,26 @@ helper.onErr = function(err) {
 }
 
 /**
- * initializes a new .projectsync.js file
+ * initializes a new project-sync.json file
  * @method function
  * @return {null} will add the file to the current directory
  */
 helper.init = function(){
   //check if file exists
   try {
-    fs.accessSync( './.projectsync.js', fs.F_OK);
+    fs.accessSync( './project-sync.json', fs.F_OK);
 
     //file already exists
-    cli.fatal(".projectsync.js already exists.");
+    cli.fatal("project-sync.json already exists.");
 
   } catch (e) {
     //create file
-    fs.writeFile( './.projectsync.js', helper.skeleton(), function(err) {
+    fs.writeFile( './project-sync.json', helper.skeleton(), function(err) {
         if(err) {
             return cli.fatal(err);
         }
 
-        cli.ok("New .projectsync.js started.");
+        cli.ok("New project-sync.json started.");
         return;
     });
   }
@@ -93,7 +163,7 @@ helper.skeleton = function(){
       }
     },
     "excludeGlobal": [
-      ".projectsync.js",
+      "project-sync.json",
       ".git"
     ]
   }, null, 2);
